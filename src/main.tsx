@@ -1,11 +1,12 @@
 import { StrictMode, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
+import { ReviewBudget } from './ReviewBudget';
+import { currentAnchor, overlapsAnchor, type EvidenceSpan as Span } from './evidence-anchors';
 
 type Persona = 'reviewer-a'|'reviewer-b'|'adjudicator';
 type Verdict = 'supported'|'unsupported'|'uncertain';
 type State = 'awaiting_reviews'|'needs_adjudication'|'complete';
-type Span = {target:'answer'|'passages'; start:number; end:number; text:string};
 type Review = {actor:Persona; verdict:Verdict; rationale:string; spans:Span[]};
 type Triage = {reason:'verdict_split'|'claim_span_split'|'both_uncertain'; overlap:number|null};
 type Summary = {id:string; triage?:Triage; external_id:string|null; batch:string; source:string; question:string; rubric:string; state:State; submitted:boolean};
@@ -19,6 +20,8 @@ const names:Record<Persona,string>={'reviewer-a':'Reviewer A','reviewer-b':'Revi
 const verdicts:Record<Verdict,string>={supported:'Supported',unsupported:'Unsupported',uncertain:'Uncertain'};
 const states:Record<State,string>={awaiting_reviews:'Awaiting reviews',needs_adjudication:'Needs adjudication',complete:'Complete'};
 const enc=encodeURIComponent;
+// The local timing pilot can disable only the optional citation assistance.
+const citationAssistance=window.location.hash!=='#citation-pilot-baseline';
 function triageLabel(t:Triage){
  if(t.reason==='verdict_split')return 'Different verdicts';
  if(t.reason==='both_uncertain')return 'Both uncertain';
@@ -66,7 +69,7 @@ function Workspace({persona}:{persona:Persona}){
  }
  return <main><section className="intro"><div><span className="eyebrow">GROUNDING REVIEW / V1</span><h1>{persona==='adjudicator'?'Adjudication queue':'Review queue'}</h1><p>{persona==='adjudicator'?'Resolve disagreements before exporting an evaluation batch. Different verdicts and non-overlapping claims are queued first.':'Check whether an AI answer is supported by the supplied source material.'}</p></div>{persona==='adjudicator'&&<button className="secondary" onClick={download}>Export JSONL ↓</button>}</section>
  {error&&<p className="error" role="alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
- {persona==='adjudicator'&&<><BatchImport onImported={()=>bump(n=>n+1)}/><BatchQuality revision={revision}/></>}
+ {persona==='adjudicator'&&<><BatchImport onImported={()=>bump(n=>n+1)}/><BatchQuality revision={revision}/><ReviewBudget/></>}
  <div className="shell"><aside className="queue" aria-label="Tasks"><div className="queue-title"><strong>Tasks</strong><span>{pending} pending</span></div>
  <label className="batch">Batch<select aria-label="Batch" value={batch} onChange={e=>setBatch(e.target.value)}><option>All batches</option>{[...new Set(tasks.map(t=>t.batch))].map(b=><option key={b}>{b}</option>)}</select></label>
  <nav aria-label="Task queue">{sorted.map(t=><button className="queue-item" key={t.id} aria-current={t.id===active?'true':undefined} onClick={()=>setId(t.id)}><small>{t.external_id??t.id.toUpperCase()} · {t.source==='synthetic'?'Synthetic demo':t.source}</small><strong>{t.question}</strong><span className={'badge '+t.state}>{t.submitted && t.state==='awaiting_reviews'?'Your review submitted':states[t.state]}</span>{t.triage&&<small className="triage-label">{triageLabel(t.triage)}</small>}</button>)}</nav></aside>
@@ -142,6 +145,13 @@ function TaskPanel({id,persona,onSaved}:{id:string;persona:Persona;onSaved:()=>v
  const [error,setError]=useState('');
  const [saving,setSaving]=useState(false);
  const sending=useRef(false);
+ const [jump,setJump]=useState<{span:Span}|null>(null);
+ const mark=useRef<HTMLElement>(null);
+ useEffect(()=>{
+  if(!jump||!mark.current)return;
+  mark.current.scrollIntoView({block:'center'});
+  mark.current.focus({preventScroll:true});
+ },[jump]);
  const passage=useRef<HTMLDivElement>(null);
  const answer=useRef<HTMLDivElement>(null);
  useEffect(()=>{
@@ -172,13 +182,23 @@ function TaskPanel({id,persona,onSaved}:{id:string;persona:Persona;onSaved:()=>v
   finally{sending.current=false;setSaving(false);}
  }
  if(!task)return <div className={error?'error':'empty'} role={error?'alert':'status'}>{error||'Loading task…'}</div>;
+ const compareAnchors=citationAssistance&&persona==='adjudicator'&&task.state==='needs_adjudication';
+ const reviews=task.reviews.filter(r=>r.actor!=='adjudicator');
+ const textByTarget={passages:task.passages,answer:task.answer};
  function textPanel(target:Span['target'],title:string,ref:React.RefObject<HTMLDivElement|null>){
-  return <section className="paper"><header><h3>{title}</h3>{task?.canSubmit&&<button className="link" onMouseDown={e=>e.preventDefault()} onClick={()=>collect(target)}>+ Add selection</button>}</header><div tabIndex={0} ref={ref} className="text">{task?.[target]}</div></section>;
+  const text=textByTarget[target];
+  const span=compareAnchors&&jump?.span.target===target&&currentAnchor(jump.span,text)?jump.span:null;
+  return <section className="paper"><header><h3>{title}</h3>{task?.canSubmit&&<button className="link" onMouseDown={e=>e.preventDefault()} onClick={()=>collect(target)}>+ Add selection</button>}</header><div tabIndex={0} ref={ref} className="text">{span?<>{text.slice(0,span.start)}<mark className="evidence-jump" ref={mark} tabIndex={-1}>{span.text}</mark>{text.slice(span.end)}</>:text}</div></section>;
  }
  return <article className="task">
  <header className="task-header"><div className="meta"><span>{task.external_id??task.id.toUpperCase()} / {task.batch}</span><span className={'badge '+task.state}>{states[task.state]}</span></div><h2>{task.question}</h2><small>Rubric: {task.rubric} · {task.source==='synthetic'?'Synthetic example':task.source}</small></header>
  <div className="panes">{textPanel('passages','Source passages',passage)}{textPanel('answer','AI answer',answer)}</div>
- {task.reviews.length>0&&<section className="review-box"><h3>{persona==='adjudicator'||task.state==='complete'?'Review record':'Your review'}</h3><div className="review-cards">{task.reviews.filter(r=>r.actor!=='adjudicator').map(r=><ReviewCard key={r.actor} review={r}/>)}</div></section>}
+ {reviews.length>0&&<section className="review-box"><h3>{compareAnchors?'Compare reviewer evidence':persona==='adjudicator'||task.state==='complete'?'Review record':'Your review'}</h3>
+ {compareAnchors&&<p className="form-help">Jump to a citation in the full text. Different selections can both be valid; overlap does not decide the verdict.</p>}
+ <div className="review-cards">{reviews.map(r=><ReviewCard key={r.actor} review={r} navigation={compareAnchors?{
+  text:textByTarget, others:reviews.filter(other=>other.actor!==r.actor).flatMap(other=>other.spans),
+  jump:span=>setJump({span}),
+ }:undefined}/>)}</div></section>}
  {task.final&&<section className="review-box final"><h3>Final decision · {task.final.actor==='adjudicator'?'Adjudicated':'Consensus'}</h3><ReviewCard review={task.final}/>{task.reference!==null&&<details><summary>Reveal benchmark annotations</summary><ul>{task.reference.length===0?<li>No hallucination spans in the reference annotations.</li>:task.reference.map((r,i)=><li key={i}>{r.label_type}: “{r.text}”</li>)}</ul></details>}</section>}
  {task.canSubmit?<form className="review-box" onSubmit={submit}><h3>{persona==='adjudicator'?'Record a final decision':'Submit independent review'}</h3><p className="form-help">Select text above, then click Add selection. Mark supporting evidence in the source, or a specific unsupported claim in the answer.</p>
  <fieldset><legend>Verdict</legend>{Object.entries(verdicts).map(([key,label])=><label key={key}><input type="radio" name="verdict" required checked={verdict===key} onChange={()=>setVerdict(key as Verdict)}/>{label}</label>)}</fieldset>
@@ -188,8 +208,16 @@ function TaskPanel({id,persona,onSaved}:{id:string;persona:Persona;onSaved:()=>v
  task.state!=='complete'&&persona!=='adjudicator'?<p className="waiting" role="status">{task.state==='needs_adjudication'?'Both reviews are in. This task is awaiting adjudication.':'Your review is locked. The other reviewer has not finished yet.'}</p>:null}
  </article>;
 }
-function ReviewCard({review}:{review:Review}){
- return <div className="review-card"><strong>{names[review.actor]} · {verdicts[review.verdict]}</strong><p>{review.rationale}</p>{review.spans.length>0&&<ul>{review.spans.map(s=><li key={s.target+s.start+':'+s.end}>{s.target==='passages'?'Source':'Answer'}: “{s.text}”</li>)}</ul>}</div>;
+type CitationNavigation={text:Record<Span['target'],string>;others:Span[];jump:(span:Span)=>void};
+function ReviewCard({review,navigation}:{review:Review;navigation?:CitationNavigation}){
+ return <div className="review-card"><strong>{names[review.actor]} · {verdicts[review.verdict]}</strong><p>{review.rationale}</p>{review.spans.length>0&&<ul>{review.spans.map((s,i)=>{
+  const label=s.target==='passages'?'Source':'Answer';
+  const valid=navigation&&currentAnchor(s,navigation.text[s.target]);
+  const matching=valid&&navigation.others.some(other=>currentAnchor(other,navigation.text[other.target])&&overlapsAnchor(s,other));
+  return <li key={s.target+s.start+':'+s.end}>{label}: “{s.text}” {navigation&&(valid?
+   <><button type="button" className="link citation-jump" onClick={()=>navigation.jump(s)} aria-label={'Jump to '+names[review.actor]+' citation '+(i+1)}>Jump to citation</button><small>{matching?'Overlaps other review':'Different selection'}</small></>:
+   <small>Source changed or citation unavailable. Check the full text manually.</small>)}</li>;
+ })}</ul>}</div>;
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App/></StrictMode>);

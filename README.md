@@ -6,6 +6,8 @@ A local annotation review workbench for evaluating whether an AI response is gro
 
 [See the workflow in the actual interface](docs/Evidence-Desk-Demo.gif)
 
+[Public benchmark: adaptive review routing, workload trade-offs, and sensitivity checks](docs/REVIEW-ROUTING-EVALUATION.md)
+
 ## Run on your Mac
 
 Requirements: Node.js 22+, Python 3.11+, PostgreSQL command-line tools (`initdb` and `pg_ctl` on PATH), and a Python environment with psycopg2. If this checkout is already set up, run:
@@ -49,6 +51,15 @@ Choose **Adjudicator → Import JSONL batch**, enter a batch name, and select a 
 
 Switch to a reviewer persona and select the new batch. Same batch and ID with identical content is skipped. Same batch and ID with different content rejects the entire upload and preserves prior reviews. Different batches may reuse external IDs. The preview stores imports locally in its dedicated PostgreSQL database and does not send them to a model or external service.
 
+## Adaptive review budget replay
+
+Choose **Adjudicator → Adaptive review · Budget replay**. Drag the second-review budget to compare uniform random assignment and risk-prioritized assignment with a random audit. The chart and table average both policies over the same 64 fixed seeds. Open **Why these cases were selected** to inspect one reproducible run.
+
+- The offline fixture contains 24 authored cases. Second-review candidates already received a first pass that did not flag them as unsupported. Ranking uses only first-pass uncertainty, capped evidence count and a synthetic missing-qualifier flag. Weights are illustrative.
+- A risk replay reserves roughly one in four second reviews for a uniform audit of the remaining queue (minimum one when the budget is at least two). First-pass flags are outside the incremental second-review budget.
+- A miss is recovered only when the reviewed case escalates to adjudication (either verdict uncertain or a second-pass unsupported verdict) and the independent fixture outcome is unsupported. Escalations are counted separately because adjudication also has a cost. The design uses the fixture outcomes for scoring, never for selecting cases.
+- The charts illustrate policy mechanics, not measured model accuracy, labor savings, or improvement on real data. The routing demo does not change the live two-review workflow. RAGTruth has reference labels but not the necessary independent first/second review history for this replay.
+
 ## Workflow and data choices
 
 - Two independent submissions per task. A matching supported verdict, or matching unsupported verdict with identical answer selections, completes a task. Mixed verdicts, different annotated unsupported claims, or any uncertainty go to an adjudicator.
@@ -65,6 +76,7 @@ Switch to a reviewer persona and select the new batch. Same batch and ID with id
 
 ```sh
 npm run build
+node --experimental-strip-types --test tests/review-budget.test.mjs
 python3 scripts/fetch_ragtruth.py
 bash scripts/check-local.sh            # local PostgreSQL + API
 bash scripts/check-local.sh --browser  # plus three isolated Chromium sessions
